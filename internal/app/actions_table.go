@@ -761,6 +761,17 @@ func init() {
 		Handler:     withPF(func(pf *panel.PanelsFrame) { ShowCompareFoldersDialog(pf) }),
 	})
 	registerAction(action.Action{
+		Name:        "Panel.SyncDirs",
+		Area:        "Shell",
+		Label:       "Synchronize Dirs",
+		LabelKey:    "Menu.Commands.SyncDirs",
+		Description: "Compare the two panels and copy or delete what differs",
+		DescKey:     "Action.Panel.SyncDirs.Desc",
+		MenuPath:    "Commands",
+		Visible:     panelCanSyncDirs,
+		Handler:     withPF(func(pf *panel.PanelsFrame) { ShowSyncDirsDialog(pf) }),
+	})
+	registerAction(action.Action{
 		Name:        "File.RunRemoteCommand",
 		Area:        "Shell",
 		Label:       "Run Command Remotely",
@@ -1478,11 +1489,16 @@ func init() {
 		Handler:     withPF(func(pf *panel.PanelsFrame) { vtui.FrameManager.EmitCommand(appcmd.CmSwapPanels, nil) }),
 	})
 	registerAction(action.Action{
-		Name:         "Panel.Toggle",
-		Area:         "Shell",
-		Label:        "Toggle Panels",
-		Description:  "Show or hide panels",
-		DescKey:      "Action.Panel.Toggle.Desc",
+		Name:        "Panel.Toggle",
+		Area:        "Shell",
+		Label:       "Toggle Panels",
+		Description: "Show or hide panels",
+		DescKey:     "Action.Panel.Toggle.Desc",
+		// NoAltScreenApp, not the stricter NoTerminalApp: a blocked CLI tool
+		// or a GUI program holding the PTY must never lock the panels away,
+		// so Ctrl+O still reaches f4 while a child is merely busy (#50). The
+		// cost is that mc, whose own Ctrl+O leaves the alternate screen, hands
+		// f4 the next press (#249) -- the lock-out is the worse of the two.
 		DefaultKeys:  []string{"CtrlO:NoAltScreenApp", "Esc:EscToggle", "Del:EscToggle", "NumDel:EscToggle"},
 		DefaultAreas: []string{"Terminal"},
 		Handler: withPF(func(pf *panel.PanelsFrame) {

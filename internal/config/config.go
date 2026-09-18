@@ -375,6 +375,71 @@ func (o CompareOptions) HasCriteria() bool {
 	return o.ByTime || o.BySize || o.ByContent
 }
 
+// SyncDefaultMask is what the mask field of the synchronize dialog starts
+// out with: everything, the way Total Commander's own field does.
+const SyncDefaultMask = "*"
+
+// SyncOptions mirrors the option row of Total Commander's "Synchronize
+// dirs" window, which is the reference this feature follows.
+type SyncOptions struct {
+	// Asymmetric makes the right folder a mirror of the left one:
+	// anything missing or older on the right is copied over it, and
+	// anything the left folder does not have is deleted from the right.
+	// Without it the two folders are peers and each side's newer file
+	// wins.
+	Asymmetric bool
+	// Subdirs compares the whole tree instead of the two folders' own
+	// files.
+	Subdirs bool
+	// ByContent reads the files whose size and time already match, to
+	// find the ones that only look equal.
+	ByContent bool
+	// IgnoreDate takes name and size as the whole truth. Total
+	// Commander documents the consequence: such a comparison can only
+	// answer "equal" or "not equal", so the copying direction is left
+	// to the user.
+	IgnoreDate bool
+	// Mask is the far2l-style file mask the comparison is limited to,
+	// including the "|" exclude section.
+	Mask string
+}
+
+// DefaultSyncOptions is Total Commander's own starting position: the whole
+// tree, everything in it, times and sizes decide.
+func DefaultSyncOptions() SyncOptions {
+	return SyncOptions{
+		Subdirs: true,
+		Mask:    SyncDefaultMask,
+	}
+}
+
+// Normalize repairs values a hand-edited config may hold.
+func (o SyncOptions) Normalize() SyncOptions {
+	if strings.TrimSpace(o.Mask) == "" {
+		o.Mask = SyncDefaultMask
+	}
+	return o
+}
+
+// CompareOptions is the comparison these sync options ask for, so that the
+// synchronize window and the Advanced Compare dialog answer the same
+// question the same way instead of growing two comparison engines.
+//
+// The two-second slack is always on: Total Commander treats a FAT
+// timestamp that is one second away from its source as the same time, and
+// without it every file copied to a memory card comes back as differing.
+func (o SyncOptions) CompareOptions() CompareOptions {
+	return CompareOptions{
+		Recursive:  o.Subdirs,
+		MaxDepth:   CompareMaxDepthLimit,
+		ByTime:     !o.IgnoreDate,
+		TimeSlack:  true,
+		BySize:     true,
+		ByContent:  o.ByContent,
+		IgnoreMode: CompareIgnoreEOL,
+	}
+}
+
 func ParsePanelScrollbarMode(value string) PanelScrollbarMode {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "minimal":
@@ -418,11 +483,13 @@ type F4Config struct {
 	CursorBlink              bool
 	ConsoleMode              string // "own" | "host" (default "own")
 	ConsoleOverlayUI         bool   // Show f4 command line and keybar overlay on top of host console (default false)
+	UseWinescape             bool   // Windows only: let the file layer use libwinescape where it is available (default true)
 	AnnounceKittyTerm        bool   // introduce the built-in terminal as kitty, so that image tools use the graphics protocol
 	CommandLineAutoComplete  bool
 	UsePromptFormat          bool
 	PromptFormat             string
 	NavigationMode           PanelNavigationMode
+	PanelAutoFilter          bool // panel quick search hides non-matching rows instead of moving the cursor
 	SearchCommandStayFocused bool
 	SyncPanelLoad            bool
 	SearchExactOnHit         bool // QuickSearch keeps only exact matches when at least one exists
@@ -569,6 +636,10 @@ type F4Config struct {
 	// Compare keeps what the folder comparison dialog was last set to,
 	// the way Far3's Advanced Compare remembers its own options.
 	Compare CompareOptions
+
+	// Sync keeps what the synchronize dialog was last set to, the way
+	// Total Commander saves its own sync options.
+	Sync SyncOptions
 }
 
 var App = F4Config{
@@ -603,11 +674,13 @@ var App = F4Config{
 	CursorBlink:              true,
 	ConsoleMode:              "own",
 	ConsoleOverlayUI:         false,
+	UseWinescape:             true,
 	AnnounceKittyTerm:        true,
 	CommandLineAutoComplete:  true,
 	UsePromptFormat:          false,
 	PromptFormat:             "$u@$n:$p$# ",
 	NavigationMode:           NavigationClassic,
+	PanelAutoFilter:          false,
 	SearchCommandStayFocused: false,
 	SyncPanelLoad:            false,
 	SearchExactOnHit:         false,
@@ -703,6 +776,7 @@ var App = F4Config{
 	LastUpdateCheck:          0,
 	LastUpdateVersion:        "",
 	Compare:                  DefaultCompareOptions(),
+	Sync:                     DefaultSyncOptions(),
 
 	// Pictures and video open in their own viewers (issue #991).
 	ViewerOpenAsSupportedType: true,
@@ -834,6 +908,7 @@ func parseConfigInto(cfg *F4Config, merged *ini.File) {
 	cfg.CursorBlink = merged.GetString("Panel", "CursorBlink", "1") != "0"
 	cfg.ConsoleMode = merged.GetString("Panel", "ConsoleMode", "own")
 	cfg.ConsoleOverlayUI = merged.GetString("Panel", "ConsoleOverlayUI", "0") == "1"
+	cfg.UseWinescape = merged.GetString("Panel", "UseWinescape", "1") != "0"
 	cfg.CommandLineAutoComplete = merged.GetString("Panel", "CommandLineAutoComplete", "1") == "1"
 	cfg.UsePromptFormat = merged.GetString("Panel", "UsePromptFormat", "0") == "1"
 	cfg.PromptFormat = merged.GetString("Panel", "PromptFormat", "$u@$n:$p$# ")
@@ -845,6 +920,7 @@ func parseConfigInto(cfg *F4Config, merged *ini.File) {
 	} else {
 		cfg.NavigationMode = NavigationClassic
 	}
+	cfg.PanelAutoFilter = merged.GetString("Panel", "PanelAutoFilter", "0") == "1"
 	cfg.SearchCommandStayFocused = merged.GetString("Panel", "SearchCommandStayFocused", "0") == "1"
 	cfg.SyncPanelLoad = merged.GetString("Panel", "SyncPanelLoad", "0") == "1"
 	cfg.SearchExactOnHit = merged.GetString("Panel", "SearchExactOnHit", "0") == "1"
@@ -1018,6 +1094,7 @@ func parseConfigInto(cfg *F4Config, merged *ini.File) {
 	cfg.TTYXKeys = merged.GetString("TTYXi", "Keys", "1") == "1"
 	cfg.TTYXKeyList = merged.GetString("TTYXi", "KeyList", DefaultTTYXKeyList)
 	cfg.Compare = LoadCompareOptions(merged)
+	cfg.Sync = LoadSyncOptions(merged)
 	cfg.ImageDecoderPriority = merged.GetString("Images", "DecoderPriority", "")
 	cfg.UseExternalEditor = merged.GetString("Editor", "UseExternalEditor", "0") == "1"
 	cfg.ExternalEditorCommand = merged.GetString("Editor", "ExternalEditorCommand", "")
@@ -1147,10 +1224,12 @@ func SerializeSettingsConfig(cfg F4Config) []byte {
 	fmt.Fprintf(&sb, "CursorBlink = %d\n", map[bool]int{true: 1, false: 0}[cfg.CursorBlink])
 	fmt.Fprintf(&sb, "ConsoleMode = %s\n", cfg.ConsoleMode)
 	fmt.Fprintf(&sb, "ConsoleOverlayUI = %d\n", map[bool]int{true: 1, false: 0}[cfg.ConsoleOverlayUI])
+	fmt.Fprintf(&sb, "UseWinescape = %d\n", map[bool]int{true: 1, false: 0}[cfg.UseWinescape])
 	fmt.Fprintf(&sb, "CommandLineAutoComplete = %d\n", map[bool]int{true: 1, false: 0}[cfg.CommandLineAutoComplete])
 	fmt.Fprintf(&sb, "UsePromptFormat = %d\n", map[bool]int{true: 1, false: 0}[cfg.UsePromptFormat])
 	fmt.Fprintf(&sb, "PromptFormat = %s\n", cfg.PromptFormat)
 	fmt.Fprintf(&sb, "NavigationMode = %s\n", cfg.NavigationMode.String())
+	fmt.Fprintf(&sb, "PanelAutoFilter = %d\n", map[bool]int{true: 1, false: 0}[cfg.PanelAutoFilter])
 	fmt.Fprintf(&sb, "SearchCommandStayFocused = %d\n", map[bool]int{true: 1, false: 0}[cfg.SearchCommandStayFocused])
 	// Keep the legacy key synchronized for older f4 versions and shared configs.
 	fmt.Fprintf(&sb, "VimHotkeys = %d\n", map[bool]int{true: 1, false: 0}[cfg.NavigationMode == NavigationVim])
@@ -1297,6 +1376,8 @@ func SerializeSettingsConfig(cfg F4Config) []byte {
 	}
 	sb.WriteString("\n[Compare]\n")
 	writeCompareOptions(&sb, cfg.Compare)
+	sb.WriteString("\n[Sync]\n")
+	writeSyncOptions(&sb, cfg.Sync)
 	sb.WriteString("\n[Plugins]\n")
 	fmt.Fprintf(&sb, "List = %s\n", strings.Join(cfg.RegisteredPlugins, "|"))
 

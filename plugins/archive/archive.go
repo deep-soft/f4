@@ -18,6 +18,7 @@ import (
 	"github.com/unxed/sevenzip"
 	"github.com/unxed/vtinput"
 	"github.com/unxed/vtui"
+	"github.com/unxed/zip"
 	"github.com/unxed/zipper/archive"
 )
 
@@ -435,10 +436,102 @@ func collectArchiveTestTotals(ctx context.Context, srcPath, password string) (ar
 	return totals, nil
 }
 
+// testZipOnce tests every member of a zip archive through unxed/zip, the
+// reader the panel uses for zip everywhere else. Its reader checks each member
+// against the checksum the archive stores for it, joins the volumes of a split
+// archive by the name of any one of them, and reads an archive that sits
+// behind an executable stub where it lies.
+func testZipOnce(ctx context.Context, srcPath, backingPath, password string, reporter vfs.TaskReporter) error {
+	reader, err := zip.OpenReaderWithPassword(backingPath, password)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = reader.Close() }()
+
+	var total int64
+	for _, member := range reader.File {
+		if member.FileInfo().IsDir() {
+			continue
+		}
+		// #nosec G115 -- a size above MaxInt64 does not fit in the archive
+		total += int64(member.UncompressedSize64)
+	}
+
+	var tested int64
+	startTime := time.Now()
+	reportProgress := func(name string, current, size int64) {
+		elapsed := time.Since(startTime)
+		speed := int64(0)
+		if elapsed > 0 {
+			speed = int64(float64(tested) / elapsed.Seconds())
+		}
+		reporter.UpdateTransfer("Testing", name, archiveTestingPercent(current, size),
+			fmt.Sprintf("Total: %s / %s", formatSize(tested), formatSize(total)),
+			archiveTestingTotalPercent(tested, total, true), formatSize(speed)+"/s")
+	}
+	reportProgress(filepath.Base(srcPath), 0, 1)
+
+	var failures []error
+	buf := make([]byte, 128*1024)
+	for _, member := range reader.File {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if member.FileInfo().IsDir() {
+			reportProgress(member.Name, -1, 0)
+			continue
+		}
+		// #nosec G115 -- see above
+		memberSize := int64(member.UncompressedSize64)
+		rc, openErr := member.Open()
+		if openErr != nil {
+			reportProgress(member.Name, 0, memberSize)
+			failures = append(failures, fmt.Errorf("%s: %w", member.Name, openErr))
+			continue
+		}
+		var memberBytes int64
+		var readErr error
+		for {
+			if err := ctx.Err(); err != nil {
+				readErr = err
+				break
+			}
+			n, err := rc.Read(buf)
+			if n > 0 {
+				memberBytes += int64(n)
+				tested += int64(n)
+				reportProgress(member.Name, memberBytes, memberSize)
+			}
+			if err != nil {
+				if err != io.EOF {
+					readErr = err
+				}
+				break
+			}
+		}
+		closeErr := rc.Close()
+		if failure := errors.Join(readErr, closeErr); failure != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", member.Name, failure))
+		}
+	}
+	if len(failures) == 0 {
+		if total < tested {
+			total = tested
+		}
+		reporter.UpdateTransfer("Testing", filepath.Base(srcPath), 100,
+			fmt.Sprintf("Total: %s / %s", formatSize(tested), formatSize(total)), 100, "")
+	}
+	return errors.Join(failures...)
+}
+
 // testArchiveOnce tests the archive stored at backingPath. srcPath is the
 // archive as the user sees it and only names it in progress updates; the two
 // differ for a self-extracting archive (see localArchiveBacking).
 func testArchiveOnce(ctx context.Context, srcPath, backingPath, password string, reporter vfs.TaskReporter) error {
+	if archive.DetectFormat(backingPath) == "zip" {
+		return testZipOnce(ctx, srcPath, backingPath, password, reporter)
+	}
+
 	totals, err := collectArchiveTestTotals(ctx, backingPath, password)
 	if err != nil {
 		return err

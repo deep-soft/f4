@@ -1882,6 +1882,17 @@ func (pf *PanelsFrame) Show(scr *vtui.ScreenBuf) {
 	} else {
 		pf.TermView.SetVisible(true)
 		pf.TermView.Show(scr)
+		// The layout keeps the keybar row out of the PTY even while a
+		// foreign program owns the terminal, but neither the keybar nor
+		// the command line is drawn in that state, so vtui's desktop
+		// background showed through the reserved row as a blue stripe
+		// under the program's output (#249).
+		if y1, y2 := unpaintedTerminalRows(pf.TermView.OnAltScreen(), isBusy, pf.TermView.Y2, pf.LastH); y1 <= y2 {
+			prevOverlay := scr.OverlayMode
+			scr.SetOverlayMode(false)
+			scr.FillRect(0, y1, pf.LastW-1, y2, ' ', terminal.DefaultTermAttr)
+			scr.SetOverlayMode(prevOverlay)
+		}
 	}
 
 	pf.syncMenuBarGeometry()
@@ -3456,8 +3467,7 @@ func (pf *PanelsFrame) CancelFastFind() bool {
 		if !ok || !fsp.FastFindMode {
 			continue
 		}
-		fsp.FastFindMode = false
-		fsp.FastFindStr = ""
+		fsp.ExitFastFind()
 		cancelled = true
 	}
 	return cancelled
@@ -5705,8 +5715,7 @@ func (pf *PanelsFrame) NavigateAvailableFolderHistory(fsp *FileSystemPanel, hist
 		if fsp == nil || path == "" {
 			continue
 		}
-		fsp.FastFindMode = false
-		fsp.FastFindStr = ""
+		fsp.ExitFastFind()
 		fsp.SuppressNextFolderHistory(path)
 		// An entry whose directory the host will not list cannot be opened
 		// either (#814): skip it like any other unavailable entry instead of
